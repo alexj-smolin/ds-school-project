@@ -1,0 +1,7 @@
+python-dotenv
+ultralytics
+opencv-python
+numpy
+dvc
+dvc-s3
+mlflow

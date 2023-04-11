@@ -1,0 +1,7 @@
+[core]
+    remote = dvc_s3
+['remote "dvc_s3"']
+    url = s3://ds-bucket
+    endpointurl = http://127.0.0.1:9000
+    access_key_id = admin1
+    secret_access_key = admin1_pass
