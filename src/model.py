@@ -1,7 +1,13 @@
+import os
 import numpy as np
 import cv2
-from utils import center_coord, crop_box, hypot
 from dataclasses import dataclass, asdict
+from torchvision.io import VideoReader, write_video
+import torch
+import mlflow
+from ultralytics import YOLO
+
+from utils import center_coord, crop_box, hypot
 
 
 @dataclass
@@ -27,21 +33,23 @@ class TrackedMetrics:
 
 class FrameContext:
     def __init__(
-            self, obj: tuple[str, float, float], frame_size: tuple[float, float],
-            camera: tuple[float, float, float], color: tuple[int, int, int]
+            self, obj: tuple[str, float, float], camera: tuple[float, float, float],
+            frame_size: tuple[float, float], ratiodev: float
     ):
         """
         :param obj: object characteristics: (name, width, height), in meters
-        :param frame_size: frame size (width x height)
         :param camera: camera characteristics: (focal length, sensor width, sensor height), in millimeters
+        :param frame_size: frame size (width x height), in pixels
+        :param ratiodev: maximum box ratio deviance
         :param color: RGB color
         """
         self.obj = {"name": obj[0], "size": np.array([obj[1], obj[2]])}
         self.frame_size = np.array(frame_size, dtype=int)
         self.frame_center = center_coord(np.array([0, 0, *frame_size]))
         self.camera = {"f": camera[0], "px_size": np.array([camera[1] / frame_size[0], camera[2] / frame_size[1]])}
-        self.color = tuple(color[::-1])
         self.obj_bbox = None
+        self.ratiodev = ratiodev
+        self.color = (0, 0, 255)
 
     def update(self, detections: list[tuple[np.array, str, float]]):
         self.obj_bbox = None
@@ -50,7 +58,7 @@ class FrameContext:
             if self.obj["name"] != name:
                 continue
 
-            curr_obj_bbox = BBox(self, name, conf, box)
+            curr_obj_bbox = BBox(self, name, conf, self.ratiodev, box)
             if not curr_obj_bbox.is_valid():
                 continue
 
@@ -80,25 +88,22 @@ class FrameContext:
 
         # object stat
         cv2.putText(frame, f"{self.obj_bbox.obj_name}:", (x_ind, 1 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
-        cv2.putText(frame, f"  conf: {self.obj_bbox.obj_conf:.2f}", (x_ind, 2 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
 
         center_shift_xy = self.obj_bbox.center_shift()
-        cv2.putText(frame, f"  X_shift: {center_shift_xy[0]:.2f} m", (x_ind, 3 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
-        cv2.putText(frame, f"  Y_shift: {center_shift_xy[1]:.2f} m", (x_ind, 4 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
-
-        object_dist_xy = self.obj_bbox.object_dist()
-        center_dist_xy = self.obj_bbox.center_dist()
-        cv2.putText(frame, f"  X_dist: {object_dist_xy[0]:.2f} ({center_dist_xy[0]:.2f}) m", (x_ind, 5 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
-        cv2.putText(frame, f"  Y_dist: {object_dist_xy[1]:.2f} ({center_dist_xy[1]:.2f}) m", (x_ind, 6 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
+        cv2.putText(frame, f"  X_shift: {center_shift_xy[0]:.2f} m", (x_ind, 2 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
+        cv2.putText(frame, f"  Y_shift: {center_shift_xy[1]:.2f} m", (x_ind, 3 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
 
         object_dist_avg = self.obj_bbox.object_dist_avg()
-        cv2.putText(frame, f"  M_dist: {object_dist_avg:.2f} m", (x_ind, 7 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
+        cv2.putText(frame, f"  Distance: {object_dist_avg:.2f} m", (x_ind, 4 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
 
         box_w, box_h = self.obj_bbox.box_crop[-2:] - self.obj_bbox.box_crop[:2]
-        cv2.putText(frame, f"  crop: {box_w}, {box_h}, {box_w / box_h:.2f}", (x_ind, 8 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
+        cv2.putText(frame, f"  bbox: {box_w}/{box_h}={box_w / box_h:.2f}", (x_ind, 6 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
         box_w, box_h = self.obj["size"]
-        cv2.putText(frame, f"  real: {box_w}, {box_h}, {box_w / box_h:.2f}", (x_ind, 9 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
+        cv2.putText(frame, f"  real: {box_w}/{box_h}={box_w / box_h:.2f}", (x_ind, 7 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
+        cv2.putText(frame, f"  conf: {self.obj_bbox.obj_conf:.2f}", (x_ind, 8 * row_h), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
 
+        center_dist_xy = self.obj_bbox.center_dist()
+        object_dist_xy = self.obj_bbox.object_dist()
         return TrackedMetrics(
             *self.camera["px_size"], *self.obj_bbox.sim_koef, self.obj_bbox.obj_conf, *self.obj_bbox.box_size,
             *center_dist_xy, *center_shift_xy, *object_dist_xy, object_dist_avg
@@ -106,7 +111,7 @@ class FrameContext:
 
 
 class BBox:
-    def __init__(self, frame_ctx: FrameContext, obj_name: str, obj_conf: float, obj_box: np.array):
+    def __init__(self, frame_ctx: FrameContext, obj_name: str, obj_conf: float, ratiodev: float, obj_box: np.array):
         self.frame_center = frame_ctx.frame_center
         self.camera = frame_ctx.camera
         self.obj_size = frame_ctx.obj["size"]
@@ -115,17 +120,19 @@ class BBox:
         self.box_raw = obj_box.astype(int)
         self.box_crop = crop_box(self.box_raw, *frame_ctx.obj["size"])
         self.box_size = self.box_crop[-2:] - self.box_crop[:2]
+        self.ratiodev = ratiodev
         self.sim_koef = self.__sim_koef(self.camera["px_size"])
 
     def __sim_koef(self, px_size):
         return self.obj_size / (self.box_size * px_size)
 
     def is_valid(self):
-        max_idx = int(self.box_crop[1] > self.box_crop[0])
+        max_idx = int(self.box_size[1] > self.box_size[0])
         min_idx = 1 - max_idx
-        valid_ratio = self.box_crop[max_idx] / self.box_crop[min_idx]
-        raw_ratio = self.box_raw[max_idx] / self.box_raw[min_idx]
-        return valid_ratio * 0.95 < raw_ratio < valid_ratio * 1.05
+        valid_ratio = self.box_size[max_idx] / self.box_size[min_idx]
+        raw_size = self.box_raw[-2:] - self.box_raw[:2]
+        raw_ratio = raw_size[max_idx] / raw_size[min_idx]
+        return valid_ratio * (1 - self.ratiodev) < raw_ratio < valid_ratio * (1 + self.ratiodev)
 
     def center_shift(self):
         center_shift_xy = (center_coord(self.box_crop) - self.frame_center) * self.camera["px_size"]
@@ -145,4 +152,70 @@ class BBox:
     def center_dist(self):
         return self.camera["f"] * self.sim_koef
 
+
+class Tracker:
+    def __init__(self, params: dict, basedir: str, mlflow_tracking_uri: str):
+        self.params = params
+        self.basedir = basedir
+        self.progress_bar = 20
+        self.model = YOLO(os.path.join(basedir, "models", params["model"]))
+        self.min_conf = params["conf"]
+        self.filepath = os.path.join(basedir, "samples", params["sample"])
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+
+    def __metadata(self):
+        cap = cv2.VideoCapture(self.filepath)
+        frame_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        frames_cnt = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        return frame_size, frames_cnt, fps
+
+    def run(self):
+        frame_size, frames_cnt, fps = self.__metadata()
+        frame_ctx = FrameContext(
+            (self.params["oname"], self.params["owidth"], self.params["oheight"]),
+            (self.params["cfocal"], self.params["cwidth"], self.params["cheight"]),
+            frame_size, self.params["ratiodev"]
+        )
+
+        reader = VideoReader(self.filepath)
+        video_array = []
+        sample_name = self.params["sample"]
+        progress_step = (frames_cnt + self.progress_bar - 1) // self.progress_bar
+
+        mlflow.set_experiment(sample_name)
+        with mlflow.start_run(run_name=frame_ctx.obj["name"]):
+            mlflow.log_params(self.params)
+            for k, frame in enumerate(reader):
+                data = cv2.cvtColor(frame["data"].moveaxis(0, 2).numpy(), cv2.COLOR_RGB2BGR)
+                predict = self.model.predict(data, conf=self.min_conf, verbose=False)[0]
+
+                detections = []
+                for i in range(predict.boxes.shape[0]):
+                    obj_cls = int(predict.boxes.cls[i].item())
+                    obj_name = predict.names.get(obj_cls)
+                    detections.append((predict.boxes.xyxy[i].cpu().numpy(), obj_name, predict.boxes.conf[i].item()))
+
+                frame_ctx.update(detections)
+                metrics = frame_ctx.draw(data)
+                if metrics is not None:
+                    mlflow.log_metrics(metrics.dict(), k)
+
+                video_array.append(cv2.cvtColor(data, cv2.COLOR_BGR2RGB))
+
+                print("\r", end="")
+                if progress_step <= 0:
+                    print("progress:", f"unknown ({(k + 1) / fps:.1f} sec)", end="")
+                else:
+                    print("progress:", "*" * ((k + progress_step - 1) // progress_step), f"[{int((k + 1) / frames_cnt * 100)}%]", end="")
+
+            mlflow.log_metric("frames", len(video_array))
+
+            print("\n[INFO] saving video ...")
+            out_filename = os.path.join(self.basedir, "tmp", sample_name)
+            write_video(out_filename, torch.tensor(np.stack(video_array)), fps)
+            mlflow.log_artifact(out_filename, "output")
+            os.remove(out_filename)
+            print(f"[INFO] video saved")
 
