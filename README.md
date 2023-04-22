@@ -16,7 +16,7 @@
 
 ## run samples:
 * airplane:
-  * `python src/main.py --sample plane.mp4 --oname airplane --owidth 14.5 --oheight 6 --cfocal 12 --cwidth 4.92 --cheight 2.77 --ratiodev 0.4`
+  * `python src/main.py --sample plane.mp4 --oname airplane --owidth 11.5 --oheight 4.8 --cfocal 25 --cwidth 4.92 --cheight 2.77 --ratiodev 0.4`
 * person walk:
   * `python src/main.py --sample fourway.avi --oname person --owidth 0.6 --oheight 1.7 --cfocal 4 --cwidth 7.38 --cheight 4.15 --ratiodev 0.5`
 * carcam1:
