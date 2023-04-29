@@ -1,10 +1,6 @@
 import numpy as np
 
 
-def exp_smooth(x, accum=None, alpha=0.5):
-    return x if accum is None else alpha * x + (1 - alpha) * accum
-
-
 def center_coord(box: np.array) -> np.array:
     return np.round((box[:2] + box[-2:]) / 2).astype(int)
 
