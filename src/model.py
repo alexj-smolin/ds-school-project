@@ -25,12 +25,12 @@ class BBox:
 class SmoothedBBox(BBox):
     def __init__(self, box: np.array, obj_size: np.array, ratiodev: float, alpha: float, prev_bbox = None):
         super().__init__(SmoothedBBox.__smooth_value(box, prev_bbox, alpha), obj_size, ratiodev)
-        self.box_raw = crop_box(box.astype(int), *obj_size)
+        self.raw = box.astype(int)
 
     def box_metrics(self):
         return super().box_metrics() | {
-            "box_raw_x1": self.box_raw[0], "box_raw_y1": self.box_raw[1],
-            "box_raw_x2": self.box_raw[2], "box_raw_y2": self.box_raw[3]
+            "box_raw_x1": self.raw[0], "box_raw_y1": self.raw[1],
+            "box_raw_x2": self.raw[2], "box_raw_y2": self.raw[3]
         }
 
     @staticmethod
@@ -38,9 +38,44 @@ class SmoothedBBox(BBox):
         if prev_bbox is None:
             return box
         if not isinstance(prev_bbox, SmoothedBBox):
-            raise Exception("Expected object of type SmoothedBbox")
-        prev_v = prev_bbox.orig
-        return alpha * box + (1. - alpha) * prev_v
+            raise Exception("Expected object of type SmoothedBBox")
+        return prev_bbox.orig + alpha * (prev_bbox.raw - prev_bbox.orig)
+
+
+class SmoothedBBox2(BBox):
+    def __init__(self, box: np.array, obj_size: np.array, ratiodev: float, alpha: float, beta: float, prev_bbox = None):
+        super().__init__(SmoothedBBox2.__smooth_value(box, prev_bbox, alpha), obj_size, ratiodev)
+        self.trend = SmoothedBBox2.__trend_value(box, self.orig, prev_bbox, beta)
+        self.raw = box.astype(int)
+
+    def box_metrics(self):
+        return super().box_metrics() | {
+            "box_raw_x1": self.raw[0], "box_raw_y1": self.raw[1],
+            "box_raw_x2": self.raw[2], "box_raw_y2": self.raw[3]
+        }
+
+    @staticmethod
+    def __smooth_value(box: np.array, prev_bbox: BBox, alpha: float) -> np.array:
+        if prev_bbox is None:
+            return box
+        if not isinstance(prev_bbox, SmoothedBBox2):
+            raise Exception("Expected object of type SmoothedBBox2")
+        if prev_bbox.trend is None:
+            s = prev_bbox.orig + (box - prev_bbox.raw)
+        else:
+            s = prev_bbox.orig + prev_bbox.trend
+        return s + alpha * (prev_bbox.raw - s)
+
+    @staticmethod
+    def __trend_value(box: np.array, curr_orig: np.array, prev_bbox: BBox, beta: float) -> np.array:
+        if prev_bbox is None:
+            return None
+        if not isinstance(prev_bbox, SmoothedBBox2):
+            raise Exception("Expected object of type SmoothedBBox2")
+        t = prev_bbox.trend
+        if t is None:
+            t = box - prev_bbox.raw
+        return t + beta * (curr_orig - prev_bbox.orig - t)
 
 
 class TrackedObject:
@@ -64,7 +99,6 @@ class TrackedObject:
 
     def __sim_koef(self, px_size):
         return self.obj_size / (self.obj_box.crop_size * px_size)
-
 
     def __add_distances(self):
         # axis distances
