@@ -45,6 +45,7 @@ services:
     image: mlflow_server:1.0
     container_name: mlflow_server
     restart: always
+    depends_on: [db, s3]
     ports:
       - "5001:5000"
     environment:
