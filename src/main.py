@@ -19,6 +19,7 @@ if __name__ == '__main__':
     ap.add_argument("--cheight", type=float, required=True, help="camera sensor height in millimeters")
     ap.add_argument("--ratiodev", type=float, default=0.2, help="maximum box ratio deviance")
     ap.add_argument("--smooth", type=float, default=1., help="apply single exponential smoothing to bounding box coordinates")
+    ap.add_argument("--async", type=bool, default=False, help="async mode with linreg prediction")
     args = vars(ap.parse_args())
 
     Tracker(args, PROJ_DIR, os.getenv("MLFLOW_TRACKING_URI")).run()

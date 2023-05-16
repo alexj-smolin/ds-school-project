@@ -20,9 +20,9 @@
 
 ## run samples:
 * airplane:
-  * `python src/main.py --sample plane.mp4 --oname airplane --owidth 11.5 --oheight 4.8 --cfocal 25 --cwidth 4.92 --cheight 2.77 --ratiodev 0.4 --smooth 0.2`
+  * `python src/main.py --sample plane.mp4 --oname airplane --owidth 11.5 --oheight 4.8 --cfocal 25 --cwidth 4.92 --cheight 2.77 --ratiodev 0.4 --async 1 --smooth 0.2`
 * person walk:
-  * `python src/main.py --sample fourway.avi --oname person --owidth 0.6 --oheight 1.7 --cfocal 4 --cwidth 7.38 --cheight 4.15 --ratiodev 0.5 --smooth 0.2`
+  * `python src/main.py --sample fourway.avi --oname person --owidth 0.6 --oheight 1.7 --cfocal 4 --cwidth 7.38 --cheight 4.15 --ratiodev 0.5 --async 1 --smooth 0.2`
 * carcam1:
   * `python src/main.py --sample carcam1.mp4 --oname car --owidth 2 --oheight 1.6 --cfocal 2.8 --cwidth 5.47 --cheight 3.07 --ratiodev 0.4`
 

@@ -8,9 +8,7 @@ import time
 
 from utils import center_coord
 from model import TrackedObject
-from detector import Detector
-
-# from multiprocessing import Process, Queue
+from detector import SimpleDetector, AsyncDetector
 
 
 class FrameEnricher:
@@ -33,10 +31,10 @@ class FrameEnricher:
         if tracked_obj is None:
             return {}
         metrics = tracked_obj.metrics()
-        obj_box = tracked_obj.obj_box
+        obj_box = tracked_obj.obj_bbox
 
         # bounding box
-        cv2.rectangle(frame, obj_box.orig[:2].astype(int), obj_box.orig[-2:].astype(int), (50, 50, 50), line_sz)
+        cv2.rectangle(frame, obj_box.xyxy[:2].astype(int), obj_box.xyxy[-2:].astype(int), (50, 50, 50), line_sz)
         cv2.rectangle(frame, obj_box.crop[:2], obj_box.crop[-2:], self.color, line_sz)
         y_text = obj_box.crop[1] + (-k5 if obj_box.crop[1] > k5 else k15)
         cv2.putText(frame, tracked_obj.obj_name, (obj_box.crop[0], y_text), cv2.FONT_HERSHEY_SIMPLEX, font_sz, self.color, line_sz)
@@ -66,12 +64,6 @@ class Tracker:
 
         mlflow.set_tracking_uri(mlflow_tracking_uri)
 
-        # self.work_in_queue = Queue(1)
-        # self.work_out_queue = Queue(1)
-        # work_proc = Process(target=self.predict, args=(self.work_in_queue, self.work_out_queue, "work_queue"))
-        # work_proc.daemon = True
-        # work_proc.start()
-
     def __metadata(self):
         cap = cv2.VideoCapture(self.sample_path)
         frame_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
@@ -79,14 +71,6 @@ class Tracker:
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
         return frame_size, frames_cnt, fps
-
-    # def predict(self, in_queue, out_queue, msg):
-    #     while True:
-    #         if not in_queue.empty():
-    #             data, i = in_queue.get()
-    #             result = self.model.predict(data, conf=self.min_conf, verbose=False)[0]
-    #             out_queue.put(result)
-    #             # print(msg, i)
 
     def run(self):
         frame_size, frames_cnt, fps = self.__metadata()
@@ -98,10 +82,12 @@ class Tracker:
 
         frame_enricher = FrameEnricher(obj_size, frame_center)
         weights_dir = os.path.join(self.basedir, "models", self.params["model"])
-        detector = Detector(
-            weights_dir, self.params["conf"], frame_center, camera_f, camera_px_size,
-            obj_name, obj_size, self.params["ratiodev"], self.params["smooth"]
+        detector = AsyncDetector if self.params["async"] else SimpleDetector
+        detector = detector(
+            weights_dir, self.params["conf"], self.params["ratiodev"], self.params["smooth"],
+            frame_center, camera_f, camera_px_size, obj_name, obj_size
         )
+        detector.warmup(30)
 
         reader = VideoReader(self.sample_path)
         video_array = []
@@ -119,7 +105,7 @@ class Tracker:
                 data = cv2.cvtColor(frame["data"].moveaxis(0, 2).numpy(), cv2.COLOR_RGB2BGR)
                 stage_read = time.time()
 
-                tracked_obj, det_metrics = detector.detect(data)
+                tracked_obj, det_metrics = detector.detect(data, k)
                 obj_metrics = frame_enricher.draw(data, k + 1, tracked_obj)
                 stage_proc = time.time()
 
@@ -135,7 +121,7 @@ class Tracker:
                     print("progress:", "*" * ((k + progress_step - 1) // progress_step), f"[{int((k + 1) / frames_cnt * 100)}%]", end="")
 
                 stage_loop = time.time()
-                all_metrics.append(det_metrics | obj_metrics | {
+                all_metrics.append(obj_metrics | det_metrics | {
                     "frame_read": stage_read - stage0, "frame_proc": stage_proc - stage_read,
                     "frame_sleep": frame_sleep, "frame_loop": stage_loop - stage0
                 })
