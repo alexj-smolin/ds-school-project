@@ -87,10 +87,9 @@ class Tracker:
             weights_dir, self.params["conf"], self.params["ratiodev"], self.params["smooth"],
             frame_center, camera_f, camera_px_size, obj_name, obj_size
         )
-        detector.warmup(30)
+        detector.warmup(20)
 
         reader = VideoReader(self.sample_path)
-        video_array = []
         sample_name = self.params["sample"]
         progress_step = (frames_cnt + self.progress_bar - 1) // self.progress_bar
 
@@ -101,7 +100,10 @@ class Tracker:
             start_time = time.time()
             stage0 = start_time
             all_metrics = []
+            video_array = []
+            frames_cnt = 0
             for k, frame in enumerate(reader):
+                frames_cnt += 1
                 data = cv2.cvtColor(frame["data"].moveaxis(0, 2).numpy(), cv2.COLOR_RGB2BGR)
                 stage_read = time.time()
 
@@ -112,7 +114,8 @@ class Tracker:
                 frame_sleep = start_time + frame["pts"] - stage_proc
                 time.sleep(max(0., frame_sleep))
 
-                video_array.append(cv2.cvtColor(data, cv2.COLOR_BGR2RGB))
+                if self.params["video"]:
+                    video_array.append(cv2.cvtColor(data, cv2.COLOR_BGR2RGB))
 
                 print("\r", end="")
                 if progress_step <= 0:
@@ -129,12 +132,14 @@ class Tracker:
             for j, m in enumerate(all_metrics):
                 mlflow.log_metrics(m, j)
 
-            mlflow.log_metric("src_frames", len(video_array))
+            mlflow.log_metric("src_frames", frames_cnt)
 
-            print("\n[INFO] saving video ...")
-            out_filename = os.path.join(self.basedir, "tmp", sample_name)
-            write_video(out_filename, torch.tensor(np.stack(video_array)), fps)
-            mlflow.log_artifact(out_filename, "output")
-            os.remove(out_filename)
-            print(f"[INFO] video saved")
+            print()
+            if video_array:
+                print("[INFO] saving video ...")
+                out_filename = os.path.join(self.basedir, "tmp", sample_name)
+                write_video(out_filename, torch.tensor(np.stack(video_array)), fps)
+                mlflow.log_artifact(out_filename, "output")
+                os.remove(out_filename)
+                print(f"[INFO] video saved")
 

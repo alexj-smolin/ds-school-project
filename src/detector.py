@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from model import TrackedObject, BBox
-from utils import hypot
+from utils import hypot, to_whxy, to_xyxy
 
 
 class BaseDetector(ABC):
@@ -83,9 +83,9 @@ class AsyncDetector(BaseDetector):
         work_proc.daemon = True
         work_proc.start()
 
-        self.n_hist, self.N_hist = 3, 20
-        self.hist_x, self.hist_y, self.hist_s = [], [], []
-        self.pred_x, self.pred_y, self.pred_s = [], [], []
+        self.n_hist, self.N_hist = 3, 30
+        self.hist_x, self.hist_y = [], []
+        self.pred_x, self.pred_y = [], []
         self.coefs = None
 
     def _async_detect(self):
@@ -110,10 +110,10 @@ class AsyncDetector(BaseDetector):
             result, k = self.det_queue.get()
             if result:
                 self.hist_x.append(k)
-                self.hist_y.append(result.obj_bbox.xyxy)
+                self.hist_y.append(to_whxy(result.obj_bbox.xyxy))
             metrics = {"pred_count": 0,
-                       "reg_b_x1": 0., "reg_b_y1": 0., "reg_b_x2": 0., "reg_b_y2": 0.,
-                       "reg_k_x1": 0., "reg_k_y1": 0., "reg_k_x2": 0., "reg_k_y2": 0.
+                       "reg_b_w": 0., "reg_b_h": 0., "reg_b_xc": 0., "reg_b_yc": 0.,
+                       "reg_k_w": 0., "reg_k_h": 0., "reg_k_xc": 0., "reg_k_yc": 0.
                        }
             return result, metrics
 
@@ -130,48 +130,50 @@ class AsyncDetector(BaseDetector):
         if not tracked_k:
             self.__flush_pred(None)
         else:
-            self.__flush_pred((k, tracked_k.obj_bbox.xyxy))
+            self.__flush_pred((k, to_whxy(tracked_k.obj_bbox.xyxy)))
         return self.__predict(num, True)
 
     def __flush_pred(self, refined: Optional[tuple[int, np.array]] = None):
         if refined:
-            coefs = AsyncDetector.__estimate_coefs((self.hist_x + [refined[0]])[1:], (self.hist_y + [refined[1]])[1:])
+            coefs = AsyncDetector.__linreg(
+                (self.hist_x + [refined[0]])[-self.N_hist:],
+                (self.hist_y + [refined[1]])[-self.N_hist:]
+            )
             assert self.pred_x[0] == refined[0], f"{self.pred_x[0]} != {refined[0]}"
             r = [refined[1]]
             for m in self.pred_x[1:]:
                 r.append(coefs[0] + coefs[1] * m)
             self.pred_y = r
 
-        # TODO: в hist добавлять только detections
-        self.hist_x = (self.hist_x + self.pred_x)[-self.N_hist:]
-        self.hist_y = (self.hist_y + self.pred_y)[-self.N_hist:]
+        self.hist_x = (self.hist_x + [self.pred_x[0], self.pred_x[-1]])[-self.N_hist:]
+        self.hist_y = (self.hist_y + [self.pred_y[0], self.pred_y[-1]])[-self.N_hist:]
         self.pred_x = []
         self.pred_y = []
 
     def __predict(self, num: int, update_coefs: bool) -> tuple[TrackedObject, dict]:
         if update_coefs:
             assert len(self.pred_x) == 0
-            self.coefs = AsyncDetector.__estimate_coefs(self.hist_x, self.hist_y)
+            self.coefs = AsyncDetector.__linreg(self.hist_x, self.hist_y)
         else:
             assert len(self.pred_x) > 0
 
-        xyxy_pred = self.coefs[0] + self.coefs[1] * num
+        whxy_pred = self.coefs[0] + self.coefs[1] * num
         self.pred_x.append(num)
-        self.pred_y.append(xyxy_pred)
-        bbox = BBox(xyxy_pred, self.obj_size, self.ratiodev)
+        self.pred_y.append(whxy_pred)
+        bbox = BBox(to_xyxy(whxy_pred), self.obj_size, self.ratiodev)
         metrics = {
             "pred_count": len(self.pred_x),
-            "reg_b_x1": self.coefs[0, 0], "reg_b_y1": self.coefs[0, 1],
-            "reg_b_x2": self.coefs[0, 2], "reg_b_y2": self.coefs[0, 3],
-            "reg_k_x1": self.coefs[1, 0], "reg_k_y1": self.coefs[1, 1],
-            "reg_k_x2": self.coefs[1, 2], "reg_k_y2": self.coefs[1, 3],
+            "reg_b_w": self.coefs[0, 0], "reg_b_h": self.coefs[0, 1],
+            "reg_b_xc": self.coefs[0, 2], "reg_b_yc": self.coefs[0, 3],
+            "reg_k_w": self.coefs[1, 0], "reg_k_h": self.coefs[1, 1],
+            "reg_k_xc": self.coefs[1, 2], "reg_k_yc": self.coefs[1, 3],
         }
         return TrackedObject(
             self.frame_center, self.camera_f, self.camera_px_size, self.obj_name, self.obj_size, -1.0, bbox
         ), metrics
 
     @staticmethod
-    def __estimate_coefs(x, y) -> np.array:
+    def __linreg(x, y) -> np.array:
         x = np.vstack(x)
         y = np.vstack(y)
         x_m = x.mean()
