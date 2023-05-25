@@ -3,19 +3,14 @@ from ultralytics import YOLO
 from multiprocessing import Process, Queue
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
-from model import TrackedObject, BBox
+from model import TrackParams, TrackedObject, BBox
 from utils import hypot, to_whxy, to_xyxy
 
 
 class BaseDetector(ABC):
-    def __init__(self, frame_center: np.array, camera_f: float, camera_px_size: np.array, obj_name: str, obj_size: np.array):
-        self.frame_center = frame_center
-        self.camera_f = camera_f
-        self.camera_px_size = camera_px_size
-        self.obj_name = obj_name
-        self.obj_size = obj_size
+    def __init__(self, params: TrackParams):
+        self.params = params
 
     @abstractmethod
     def warmup(self, n):
@@ -30,17 +25,15 @@ class BaseDetector(ABC):
         tracked_obj = None
         for i in range(detections.boxes.shape[0]):
             obj_cls = int(detections.boxes.cls[i].item())
-            if self.obj_name != detections.names.get(obj_cls):
+            if self.params.obj_name != detections.names.get(obj_cls):
                 continue
 
-            bbox = bbox_sup(detections.boxes.xyxy[i].cpu().numpy())
+            bbox = bbox_sup(detections.boxes.xyxy[i].detach().cpu().numpy())
             if not bbox.is_valid:
                 continue
 
             conf = detections.boxes.conf[i].item()
-            curr_tracked = TrackedObject(
-                self.frame_center, self.camera_f, self.camera_px_size, self.obj_name, self.obj_size, conf, bbox
-            )
+            curr_tracked = TrackedObject(self.params, conf, bbox)
             curr_dist = hypot(*curr_tracked.center_shift)
             if min_dist is None or curr_dist < min_dist:
                 tracked_obj = curr_tracked
@@ -49,8 +42,8 @@ class BaseDetector(ABC):
 
 
 class SimpleDetector(BaseDetector):
-    def __init__(self, model_weights_dir: str, min_conf: float, ratiodev: float, smooth: float, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, model_weights_dir: str, min_conf: float, ratiodev: float, smooth: float, params: TrackParams):
+        super().__init__(params)
         self.model = YOLO(model_weights_dir)
         self.min_conf = min_conf
         self.ratiodev = ratiodev
@@ -61,7 +54,7 @@ class SimpleDetector(BaseDetector):
         pass
 
     def detect(self, frame: np.array, num: int) -> tuple[TrackedObject, dict]:
-        bbox_sup = lambda xyxy: BBox(xyxy, self.obj_size, self.ratiodev, self.smooth, self.prev_bbox)
+        bbox_sup = lambda xyxy: BBox(xyxy, self.params.obj_size, self.ratiodev, self.smooth, self.prev_bbox)
         detections = self.model.predict(frame, conf=self.min_conf, verbose=False)[0]
         tracked_obj = self._handle_detections(detections, bbox_sup)
         self.prev_bbox = None if tracked_obj is None else tracked_obj.obj_bbox
@@ -69,12 +62,14 @@ class SimpleDetector(BaseDetector):
 
 
 class AsyncDetector(BaseDetector):
-    def __init__(self, model_weights_dir: str, min_conf: float, ratiodev: float, smooth: float, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, model_weights_dir: str, min_conf: float, ratiodev: float, smooth: float, params: TrackParams):
+        super().__init__(params)
         self.model_weights_dir = model_weights_dir
         self.min_conf = min_conf
         self.ratiodev = ratiodev
         self.smooth = smooth
+        self.params = params
+        self.prev_bbox = None
 
         self.job_queue = Queue(1)
         self.det_queue = Queue(1)
@@ -83,18 +78,17 @@ class AsyncDetector(BaseDetector):
         work_proc.daemon = True
         work_proc.start()
 
-        self.n_hist, self.N_hist = 3, 30
         self.hist_x, self.hist_y = [], []
         self.pred_x, self.pred_y = [], []
         self.coefs = None
 
     def _async_detect(self):
         model = YOLO(self.model_weights_dir)
-        bbox_sup = lambda xyxy: BBox(xyxy, self.obj_size, self.ratiodev)
+        bbox_sup = lambda xyxy: BBox(xyxy, self.params.obj_size, self.ratiodev)
         while True:
             frame, num = self.job_queue.get()
             detections = model.predict(frame, conf=self.min_conf, verbose=False)[0]
-            tracked_obj = super()._handle_detections(detections, bbox_sup)
+            tracked_obj = self._handle_detections(detections, bbox_sup)
             self.det_queue.put((tracked_obj, num))
 
     def warmup(self, n):
@@ -104,18 +98,21 @@ class AsyncDetector(BaseDetector):
             self.det_queue.get()
 
     def detect(self, frame: np.array, num: int) -> tuple[TrackedObject, dict]:
-        if len(self.hist_x) < self.n_hist:
+        if len(self.hist_x) < 2:
             assert not self.async_detect, "Async detection not available"
             self.job_queue.put((frame, num))
-            result, k = self.det_queue.get()
+            result, m = self.det_queue.get()
             if result:
-                self.hist_x.append(k)
-                self.hist_y.append(to_whxy(result.obj_bbox.xyxy))
+                self.hist_x.append(m)
+                self.hist_y.append(to_whxy(result.obj_bbox.crop))
+                self.prev_bbox = BBox(result.obj_bbox.xyxy, self.params.obj_size, self.ratiodev, self.smooth, self.prev_bbox)
             metrics = {"pred_count": 0,
-                       "reg_b_w": 0., "reg_b_h": 0., "reg_b_xc": 0., "reg_b_yc": 0.,
-                       "reg_k_w": 0., "reg_k_h": 0., "reg_k_xc": 0., "reg_k_yc": 0.
+                       "reg_b_w": 0., "reg_b_h": 0., "reg_b_x": 0., "reg_b_y": 0.,
+                       "reg_k_w": 0., "reg_k_h": 0., "reg_k_x": 0., "reg_k_y": 0.
                        }
             return result, metrics
+
+        assert len(self.hist_x) == 2, f"Actual hist size: {len(self.hist_x)}"
 
         if not self.async_detect:
             self.job_queue.put((frame, num))
@@ -125,30 +122,17 @@ class AsyncDetector(BaseDetector):
         if self.det_queue.empty():
             return self.__predict(num, False)
 
-        tracked_k, k = self.det_queue.get()
+        tracked_m, m = self.det_queue.get()
         self.job_queue.put((frame, num))
-        if not tracked_k:
-            self.__flush_pred(None)
-        else:
-            self.__flush_pred((k, to_whxy(tracked_k.obj_bbox.xyxy)))
-        return self.__predict(num, True)
+        if not tracked_m:
+            return self.__predict(num, False)
 
-    def __flush_pred(self, refined: Optional[tuple[int, np.array]] = None):
-        if refined:
-            coefs = AsyncDetector.__linreg(
-                (self.hist_x + [refined[0]])[-self.N_hist:],
-                (self.hist_y + [refined[1]])[-self.N_hist:]
-            )
-            assert self.pred_x[0] == refined[0], f"{self.pred_x[0]} != {refined[0]}"
-            r = [refined[1]]
-            for m in self.pred_x[1:]:
-                r.append(coefs[0] + coefs[1] * m)
-            self.pred_y = r
-
-        self.hist_x = (self.hist_x + [self.pred_x[0], self.pred_x[-1]])[-self.N_hist:]
-        self.hist_y = (self.hist_y + [self.pred_y[0], self.pred_y[-1]])[-self.N_hist:]
+        assert m in self.pred_x, f"detected frame {m} not in pred_x ({self.pred_x})"
         self.pred_x = []
         self.pred_y = []
+        self.hist_x = [np.mean(self.hist_x), m]
+        self.hist_y = [np.mean(self.hist_y, axis=0), to_whxy(tracked_m.obj_bbox.crop)]
+        return self.__predict(num, True)
 
     def __predict(self, num: int, update_coefs: bool) -> tuple[TrackedObject, dict]:
         if update_coefs:
@@ -160,17 +144,15 @@ class AsyncDetector(BaseDetector):
         whxy_pred = self.coefs[0] + self.coefs[1] * num
         self.pred_x.append(num)
         self.pred_y.append(whxy_pred)
-        bbox = BBox(to_xyxy(whxy_pred), self.obj_size, self.ratiodev)
+        self.prev_bbox = BBox(to_xyxy(whxy_pred), self.params.obj_size, self.ratiodev, self.smooth, self.prev_bbox)
         metrics = {
             "pred_count": len(self.pred_x),
             "reg_b_w": self.coefs[0, 0], "reg_b_h": self.coefs[0, 1],
-            "reg_b_xc": self.coefs[0, 2], "reg_b_yc": self.coefs[0, 3],
+            "reg_b_x": self.coefs[0, 2], "reg_b_y": self.coefs[0, 3],
             "reg_k_w": self.coefs[1, 0], "reg_k_h": self.coefs[1, 1],
-            "reg_k_xc": self.coefs[1, 2], "reg_k_yc": self.coefs[1, 3],
+            "reg_k_x": self.coefs[1, 2], "reg_k_y": self.coefs[1, 3],
         }
-        return TrackedObject(
-            self.frame_center, self.camera_f, self.camera_px_size, self.obj_name, self.obj_size, -1.0, bbox
-        ), metrics
+        return TrackedObject(self.params, -1.0, self.prev_bbox), metrics
 
     @staticmethod
     def __linreg(x, y) -> np.array:
@@ -179,6 +161,7 @@ class AsyncDetector(BaseDetector):
         x_m = x.mean()
         y_m = y.mean(axis=0)
         k = ((x - x_m) * (y - y_m)).sum(axis=0) / ((x - x_m) ** 2).sum()
+        k = np.clip(k, -10, 10)
         b = y_m - x_m * k
         return np.vstack([b, k])
 

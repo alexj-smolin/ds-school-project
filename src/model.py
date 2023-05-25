@@ -1,6 +1,17 @@
 import numpy as np
 
+from dataclasses import dataclass
+
 from utils import center_coord, crop_box, hypot
+
+
+@dataclass
+class TrackParams:
+    frame_center: np.array
+    camera_f: float
+    camera_px_size: np.array
+    obj_name: str
+    obj_size: np.array
 
 
 class BBox:
@@ -39,17 +50,12 @@ class BBox:
 
 class TrackedObject:
     def __init__(
-            self, frame_center: np.array, camera_f: float, camera_px_size: np.array,
-            obj_name: str, obj_size: np.array, obj_conf: float, obj_bbox: BBox
+            self, params: TrackParams, obj_conf: float, obj_bbox: BBox
     ):
-        self.frame_center = frame_center
-        self.camera_f = camera_f
-        self.camera_px_size = camera_px_size
-        self.obj_name = obj_name
-        self.obj_size = obj_size
+        self.params = params
         self.obj_conf = obj_conf
         self.obj_bbox = obj_bbox
-        self.sim_coef = self.__sim_coef(camera_px_size)
+        self.sim_coef = self.__sim_coef(params.camera_px_size)
         self.__add_distances()
         self.__basic_metrics = [
             "px_size_x", "px_size_y", "sim_coef_x", "sim_coef_y", "object_conf", "center_dist_x", "center_dist_y",
@@ -57,24 +63,24 @@ class TrackedObject:
         ]
 
     def __sim_coef(self, px_size):
-        return self.obj_size / (self.obj_bbox.crop_size * px_size)
+        return self.params.obj_size / (self.obj_bbox.crop_size * px_size)
 
     def __add_distances(self):
         # axis distances
-        center_shift_xy = (center_coord(self.obj_bbox.crop) - self.frame_center) * self.camera_px_size
-        self.center_dist = self.camera_f * self.sim_coef
+        center_shift_xy = (center_coord(self.obj_bbox.crop) - self.params.frame_center) * self.params.camera_px_size
+        self.center_dist = self.params.camera_f * self.sim_coef
         self.center_shift = center_shift_xy * self.sim_coef
-        self.object_dist = hypot(center_shift_xy, self.camera_f) * self.sim_coef
+        self.object_dist = hypot(center_shift_xy, self.params.camera_f) * self.sim_coef
 
         # average object distance
-        px_size_avg = np.mean(self.camera_px_size)
+        px_size_avg = np.mean(self.params.camera_px_size)
         sim_coef_avg = np.mean(self.__sim_coef(px_size_avg))
-        center_shift_avg = hypot(*((center_coord(self.obj_bbox.crop) - self.frame_center) * px_size_avg))
-        self.object_dist_avg = hypot(center_shift_avg, self.camera_f) * sim_coef_avg
+        center_shift_avg = hypot(*((center_coord(self.obj_bbox.crop) - self.params.frame_center) * px_size_avg))
+        self.object_dist_avg = hypot(center_shift_avg, self.params.camera_f) * sim_coef_avg
 
     def metrics(self) -> dict:
         result = dict(zip(self.__basic_metrics, [
-            *self.camera_px_size, *self.sim_coef, self.obj_conf, *self.center_dist,
+            *self.params.camera_px_size, *self.sim_coef, self.obj_conf, *self.center_dist,
             *self.center_shift, *self.object_dist, self.object_dist_avg
         ]))
         return result | self.obj_bbox.box_metrics()
